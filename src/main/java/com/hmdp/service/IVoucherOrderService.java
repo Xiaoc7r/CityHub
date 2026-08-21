@@ -19,4 +19,8 @@ public interface IVoucherOrderService extends IService<VoucherOrder> {
     void createVoucherOrder(VoucherOrder voucherOrder);
 
     void handleVoucherOrder(VoucherOrder voucherOrder);
+
+    boolean payCallback(Long orderId);
+
+    boolean closeTimeoutOrder(Long orderId);
 }
