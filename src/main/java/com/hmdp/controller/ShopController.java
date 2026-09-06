@@ -3,6 +3,7 @@ package com.hmdp.controller;
 
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.hmdp.annotation.RateLimiter;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
 import com.hmdp.service.IShopService;
@@ -32,6 +33,7 @@ public class ShopController {
      * @param id 商铺id
      * @return 商铺详情数据
      */
+    @RateLimiter(key = "shop:query", windowSeconds = 1, count = 20, dimension = "ip")
     @GetMapping("/{id}")
     public Result queryShopById(@PathVariable("id") Long id) throws InterruptedException {
         return shopService.queryById(id);

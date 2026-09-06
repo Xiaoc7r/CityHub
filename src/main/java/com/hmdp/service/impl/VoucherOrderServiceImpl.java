@@ -10,14 +10,11 @@ import com.hmdp.service.IVoucherOrderService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.UserHolder;
-import com.rabbitmq.client.Channel;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.ibatis.javassist.bytecode.stackmap.BasicBlock;
+import org.apache.rocketmq.spring.core.RocketMQTemplate;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
-import org.springframework.amqp.core.Message;
-import org.springframework.amqp.rabbit.annotation.RabbitListener;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
@@ -54,7 +51,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private ISeckillVoucherService seckillVoucherService;
 
     @Resource
-    private RabbitTemplate rabbitTemplate;
+    private RocketMQTemplate rocketMQTemplate;
     @Resource
     private RedisIdWorker redisIdWorker;
 
@@ -225,19 +222,17 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 //        proxy = (IVoucherOrderService) AopContext.currentProxy();
 //        //4.返回订单id
 //        return Result.ok(orderId);
-        // 2. 脱离请求线程，发消息给 RabbitMQ
+        // 2. 脱离请求线程，发消息给 RocketMQ
         VoucherOrder order = new VoucherOrder();
         order.setId(orderId);
         order.setUserId(userId);
         order.setVoucherId(voucherId);
-        // 你可以用 JSON，也可以用序列化
-        // 增加消息发送的异常处理
-        //放入mq
+        // 放入 RocketMQ 异步下单
         String jsonStr = JSONUtil.toJsonStr(order);
         try {
-            rabbitTemplate.convertAndSend("X","XA",jsonStr );
+            rocketMQTemplate.convertAndSend("seckill-order-topic", jsonStr);
         } catch (Exception e) {
-            log.error("发送 RabbitMQ 消息失败，订单ID: {}", orderId, e);
+            log.error("发送 RocketMQ 消息失败，订单ID: {}", orderId, e);
             throw new RuntimeException("发送消息失败");
         }
         // 3. 返回订单号给前端（实际下单异步处理）
@@ -316,5 +311,43 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
             save(voucherOrder);
 
+    }
+
+    /**
+     * 支付回调：使用乐观锁确保只有“未支付”订单能流转为“已支付”。
+     */
+    @Transactional
+    public boolean payCallback(Long orderId) {
+        boolean updated = update()
+                .eq("id", orderId)
+                .eq("status", 1)
+                .set("status", 2)
+                .set("pay_time", java.time.LocalDateTime.now())
+                .update();
+        return updated;
+    }
+
+    /**
+     * 超时关单：使用乐观锁确保只有“未支付”订单能流转为“已取消”，
+     * 关单成功后再释放被占用的库存。
+     */
+    @Transactional
+    public boolean closeTimeoutOrder(Long orderId) {
+        VoucherOrder order = getById(orderId);
+        if (order == null || order.getStatus() == null || order.getStatus() != 1) {
+            return false;
+        }
+        boolean updated = update()
+                .eq("id", orderId)
+                .eq("status", 1)
+                .set("status", 4)
+                .update();
+        if (updated) {
+            seckillVoucherService.update()
+                    .setSql("stock = stock + 1")
+                    .eq("voucher_id", order.getVoucherId())
+                    .update();
+        }
+        return updated;
     }
 }

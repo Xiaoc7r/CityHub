@@ -15,6 +15,8 @@ import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RedisData;
 import com.hmdp.utils.SystemConstants;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.rocketmq.spring.core.RocketMQTemplate;
 import org.springframework.dao.IncorrectResultSizeDataAccessException;
 import org.springframework.data.geo.Distance;
 import org.springframework.data.geo.GeoResult;
@@ -45,6 +47,7 @@ import static com.hmdp.utils.RedisConstants.*;
  * @author 虎哥
  * @since 2021-12-22
  */
+@Slf4j
 @Service
 public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IShopService {
 
@@ -53,6 +56,9 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     @Resource
     private CacheClient clientClient;
+
+    @Resource
+    private RocketMQTemplate rocketMQTemplate;
     @Override
     public Result queryById(Long id){
         /*缓存穿透
@@ -238,8 +244,13 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         }
         //1.先修改数据库
         updateById(shop);
-        //2.删除缓存
-        stringRedisTemplate.delete(CACHE_SHOP_KEY+shop.getId());
+        //2.删除缓存，删除失败时通过 RocketMQ 补偿重试
+        try {
+            stringRedisTemplate.delete(CACHE_SHOP_KEY + shop.getId());
+        } catch (Exception e) {
+            log.error("删除缓存失败，发送 RocketMQ 补偿消息，shopId={}", shop.getId(), e);
+            rocketMQTemplate.convertAndSend("cache-delete-topic", String.valueOf(shop.getId()));
+        }
         return Result.ok();
     }
 
