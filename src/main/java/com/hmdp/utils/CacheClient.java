@@ -8,6 +8,10 @@ import com.hmdp.entity.Shop;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import java.util.Collections;
+import java.util.UUID;
 
 import java.time.LocalDateTime;
 import java.util.concurrent.ExecutorService;
@@ -71,6 +75,12 @@ public class CacheClient {
 
 
     private static final ExecutorService CACHE_REBUILD_EXECUTOR= Executors.newFixedThreadPool(10);
+    private static final DefaultRedisScript<Long> UNLOCK_SCRIPT;
+    static {
+        UNLOCK_SCRIPT = new DefaultRedisScript<>();
+        UNLOCK_SCRIPT.setLocation(new ClassPathResource("unlock.lua"));
+        UNLOCK_SCRIPT.setResultType(Long.class);
+    }
     public <R,ID> R queryWithLogicalExpire(
             String keyPrefix,ID id,Class<R> type,Function<ID,R> dbFallback,Long time,TimeUnit unit){
         String key=keyPrefix+id;
@@ -96,7 +106,10 @@ public class CacheClient {
         //6.缓存重建
         //6.1.获取互斥锁
         String lockKey=RedisConstants.LOCK_SHOP_KEY+id;
-        boolean isLock = tryLock(lockKey);
+        // The request thread acquires the lock, a worker releases it. Use a
+        // per-acquisition token rather than a thread ID or a shared constant.
+        String lockToken = UUID.randomUUID().toString();
+        boolean isLock = tryLock(lockKey, lockToken);
         //6.2.判断是否获取锁成功
         if(isLock){
             //  6.3.成功，开启独立线程实现缓存重建
@@ -110,7 +123,7 @@ public class CacheClient {
                     throw new RuntimeException(e);
                 }finally {
                     //释放锁
-                    unLock(key);
+                    unLock(lockKey, lockToken);
                 }
             });
 
@@ -125,8 +138,8 @@ public class CacheClient {
      * @param key
      * @return
      */
-    private boolean tryLock(String key){
-        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", 10, TimeUnit.SECONDS);
+    private boolean tryLock(String key, String token){
+        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, token, 10, TimeUnit.SECONDS);
         return BooleanUtil.isTrue(flag);
     }
 
@@ -134,7 +147,7 @@ public class CacheClient {
      * 封闭锁
      * @param key
      */
-    private void unLock(String key){
-        stringRedisTemplate.delete(key);
+    private void unLock(String key, String token){
+        stringRedisTemplate.execute(UNLOCK_SCRIPT, Collections.singletonList(key), token);
     }
 }
